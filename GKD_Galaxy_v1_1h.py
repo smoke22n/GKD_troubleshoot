@@ -55,13 +55,12 @@
 # ═══════════════════════════════════════════════════════════════════════════════
 """
 
-import math
 import numpy as np
 import pandas as pd
 from pandas import DataFrame, Series
 import talib.abstract as ta
 import talib
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import pickle
@@ -2249,62 +2248,8 @@ class GKD_Galaxy_v1_1h(IStrategy):
     
     position_adjustment_enable = True
 
-    # AceVault State Management
-    _state: Dict[str, Dict[str, Any]] = {}
-    custom_info: Dict[str, Any] = {}
-    _core_pairs: Dict[str, str] = {}
-    _initial_wallet: float = 0.0
-    _last_equity_log_time: Optional[datetime] = None
-
     # --- Dry Run Wallet placeholder ---
     dry_run_wallet_balance = 3000.0
-
-    # -------------------- AceVault Parameters --------------------
-    # Target di utilizzo del capitale: margin totale ~40% -> long ~20%, short ~20%
-    total_margin_target = DecimalParameter(0.20, 0.50, default=0.33, decimals=2, space="buy", optimize=True)
-    long_margin_fraction_of_total = DecimalParameter(0.30, 0.70, default=0.35, decimals=2, space="buy", optimize=True)
-
-    # Ripartizione tra le 3 core long (BTC, ETH, HYPE) — pesi normalizzati
-    core_weight_btc = DecimalParameter(0.05, 2.00, default=1.0, decimals=2, space="buy", optimize=False)
-    core_weight_eth = DecimalParameter(0.05, 2.00, default=1.0, decimals=2, space="buy", optimize=False)
-    core_weight_hype = DecimalParameter(0.05, 2.00, default=1.0, decimals=2, space="buy", optimize=False)
-
-    # Leva fissa 5x richiesta (used as fallback)
-    fixed_leverage = DecimalParameter(1.0, 10.0, default=10.0, decimals=1, space="buy", optimize=False)
-
-    # Dimensione parziali (stake currency): frazione dell initial_stake della posizione
-    partial_entry_frac = DecimalParameter(0.05, 0.30, default=0.10, decimals=2, space="buy", optimize=True)
-    partial_exit_frac = DecimalParameter(0.05, 0.30, default=0.10, decimals=2, space="sell", optimize=True)
-
-    # Gate temporali per la cadenza (stile CSV: cluster circa ogni ~5 minuti)
-    add_interval_minutes = DecimalParameter(60.0, 120.0, default=60.0, decimals=1, space="buy", optimize=True)
-    # Crescita progressiva dell intervallo tra entrate parziali: es. 0.10 => +10% per ogni add
-    add_interval_growth_pct = DecimalParameter(0.00, 0.1, default=0.0, decimals=2, space="buy", optimize=True)
-    reduce_interval_minutes = DecimalParameter(60.0, 120.0, default=60.0, decimals=1, space="sell", optimize=True)
-    # Tetto massimo al numero di entrate parziali per trade
-    max_partial_entries = IntParameter(0, 100, default=10000, space="buy", optimize=False)
-
-    # Chiusura completa se la posizione è diventata microscopica
-    min_close_stake = DecimalParameter(1.0, 50.0, default=5.0, decimals=1, space="sell", optimize=True)
-    # Percentuali del total balance sotto le quali chiudere il trade
-    # Core: 2% (0.0200), Alt: 0.75% (0.0075)
-    min_close_pct_core = DecimalParameter(0.0050, 0.1000, default=0.0200, decimals=4, space="sell", optimize=True)
-    min_close_pct_alt = DecimalParameter(0.0010, 0.0500, default=0.0075, decimals=4, space="sell", optimize=True)
-    # Soglie per gating dinamico delle partial entry basato su used_pct e lato perdente
-    used_pct_double_thr = DecimalParameter(0.50, 0.95, default=0.70, decimals=2, space="buy", optimize=False)
-    used_pct_triple_thr = DecimalParameter(0.60, 0.99, default=0.85, decimals=2, space="buy", optimize=False)
-    losing_side_share_thr = DecimalParameter(0.50, 0.90, default=0.70, decimals=2, space="buy", optimize=False)
-
-    # Equity logging / guardia
-    equity_log_interval_minutes = DecimalParameter(1.0, 60.0, default=5.0, decimals=1, space="sell", optimize=True)
-    equity_warn_ratio = DecimalParameter(0.05, 0.80, default=0.20, decimals=2, space="sell", optimize=True)
-
-    # Parametri leva dinamica basata su volatilità (ATR/close)
-    max_leverage = IntParameter(5, 40, default=25, space="sell")
-    btc_leverage_cap = IntParameter(5, 40, default=25, space="sell")
-    non_btc_leverage_cap = IntParameter(3, 25, default=15, space="sell")
-
-    atr_window = IntParameter(10, 50, default=14, space="buy")
 
     # --- 3-Candle Forced Decision ---
     forced_exit_period = IntParameter(1, 3, default=1, space='buy', optimize=True)
@@ -2316,7 +2261,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
     # --- Low Stake Replenishment ---
     replenish_enabled = BooleanParameter(default=True, space='buy', optimize=False)
     replenish_stake_threshold_usd = DecimalParameter(1.0, 10.0, default=6.5, space='buy', optimize=True)
-    replenish_stake_pct = DecimalParameter(0.25, 1.0, default=0.8, space='buy', optimize=True)
+    replenish_stake_pct = DecimalParameter(0.25, 1.0, default=0.75, space='buy', optimize=True)
 
     # --- Progressive DCA & Profit-Taking (based on initial stake) ---
     progressive_dca_enabled = BooleanParameter(default=True, space='buy', optimize=False)
@@ -2347,7 +2292,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
     dca_subsequent_trigger = DecimalParameter(-0.10, -0.02, default=-0.10, space='buy', optimize=False)
 
     # --- PROFIT State Parameters ---
-    profit_max_position_adjustment = IntParameter(1, 15, default=30, space='sell', optimize=True)
+    profit_max_position_adjustment = IntParameter(1, 15, default=15, space='sell', optimize=True)
     profit_dca_multiplier = DecimalParameter(0.1, 0.5, default=0.1, space='buy', optimize=True)
     profit_take_profit_pct = DecimalParameter(0.005, 0.03, default=0.1, space='sell', optimize=True)
     profit_sell_amount_pct = DecimalParameter(0.1, 0.5, default=0.25, space='sell', optimize=True)
@@ -2358,7 +2303,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
     max_dca_sell_amount_pct = DecimalParameter(0.1, 0.5, default=0.3, space='sell', optimize=True)
 
     # --- ML Confidence Threshold ---
-    dca_ml_conf_threshold = DecimalParameter(0.04, 0.9, default=0.01, space='buy', optimize=True)
+    dca_ml_conf_threshold = DecimalParameter(0.04, 0.9, default=0.05, space='buy', optimize=True)
     
     # ═══════════════════════════════════════════════════════════════════════════════
     # 📊 PLOT CONFIGURATION - Beautiful Multi-Timeframe Visualization
@@ -2617,19 +2562,6 @@ class GKD_Galaxy_v1_1h(IStrategy):
         
         # ATR for position sizing (calculated on 15m for responsiveness)
         dataframe['atr'] = talib.ATR(dataframe['high'], dataframe['low'], dataframe['close'], timeperiod=14)
-        # -------------------- AceVault Indicators --------------------
-        dataframe['atr_pct'] = (
-            dataframe['atr'] / dataframe['close']
-        ).replace([np.inf, -np.inf], np.nan).ffill()
-
-        # Save last atr_pct for dynamic leverage
-        try:
-            if pair is not None and len(dataframe) > 0:
-                st = self._pair_state(pair)
-                last_ap = float(dataframe['atr_pct'].iloc[-1]) if not math.isnan(dataframe['atr_pct'].iloc[-1]) else None
-                st['last_atr_pct'] = last_ap
-        except Exception:
-            pass
         
         # ═══════════════════════════════════════════════════════════════════════════════
         # 🎯 HYBRID TECHNICAL INDICATORS (Technical + Patterns)
@@ -3855,80 +3787,14 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
         return None
     
-    # ----------------------- Position adjustment (DCA) - AceVault Version ----------------------
     def adjust_trade_position(self, trade: Trade, current_time: datetime, current_rate: float,
-                              current_profit: float, min_stake: Optional[float], max_stake: float,
-                              current_entry_rate: float, current_exit_rate: float,
-                              current_entry_profit: float, current_exit_profit: float,
-                              **kwargs) -> Optional[float]:
+                              current_profit: float, min_stake: float, max_stake: float, **kwargs) -> Optional[float]:
         """
-        🚀 STATE MACHINE TRADE MANAGEMENT SYSTEM (GKD + AceVault Addon)
+        State Machine for Trade Adjustments.
 
-        Logic:
-        1. Low Stake Replenishment (AceVault Addon)
-        2. State Machine:
-           - DEFENDING: DCA when losing (based on initial_stake)
-           - PROFIT: Partial exits & Reloads (based on initial_stake)
-           - MAX_DCA: De-risking
+        Manages trades through distinct states for more intelligent decision-making.
+        States: INITIAL, DEFENDING, PROFIT, MAX_DCA.
         """
-        if not trade.is_open:
-            return None
-
-        pair = trade.pair
-        st = self._state.setdefault(pair, {})
-
-        # -------------------- AceVault State Management & Initial Stake --------------------
-        # Reset state if it's a new trade (avoids carry-over)
-        try:
-            prev_tid = st.get('trade_id')
-            cur_tid = getattr(trade, 'id', None)
-            if prev_tid is None or prev_tid != cur_tid:
-                st['trade_id'] = cur_tid
-                st['initial_stake'] = float(getattr(trade, 'stake_amount', 0.0))
-                # Reset counters
-                st['dca_count'] = 0
-                st['add_count'] = 0 # Compatibility
-        except Exception:
-            pass
-
-        # Track initial_stake (CRITICAL: AceVault Addon)
-        if 'initial_stake' not in st or st.get('initial_stake', 0.0) <= 0.0:
-            try:
-                # Attempt to recover initial stake from the first order
-                # This handles cases where state was lost or trade started before this logic
-                orders = trade.orders
-                if orders:
-                    # Filter for filled buy orders and sort by date
-                    buy_orders = [o for o in orders if o.ft_order_side == 'buy' and o.status == 'closed']
-                    if buy_orders:
-                        buy_orders.sort(key=lambda x: x.order_date)
-                        # Use the cost of the very first buy order
-                        first_order_cost = buy_orders[0].cost
-                        if first_order_cost > 0:
-                            # Adjust for leverage: cost is notional value, stake is margin
-                            leverage = trade.leverage if trade.leverage else 1.0
-                            st['initial_stake'] = float(first_order_cost) #/ float(leverage)
-                        else:
-                            # Fallback if cost is 0 (shouldn't happen for filled orders)
-                            st['initial_stake'] = float(getattr(trade, 'stake_amount', 0.0))
-                    else:
-                        # No closed buy orders found (maybe market order not yet fully processed in backtesting?)
-                        st['initial_stake'] = float(getattr(trade, 'stake_amount', 0.0))
-                else:
-                    st['initial_stake'] = float(getattr(trade, 'stake_amount', 0.0))
-            except Exception as e:
-                logger.warning(f"Could not recover initial_stake for {pair}: {e}")
-                st['initial_stake'] = float(getattr(trade, 'stake_amount', 0.0))
-
-        # Use stored initial_stake for all calculations
-        initial_stake = float(st.get('initial_stake', trade.stake_amount))
-
-        # Sanity check: If initial_stake is suspiciously low (e.g. < 2 USD) and we have a replenishment threshold,
-        # it implies we might have failed to recover the true initial stake.
-        # However, we shouldn't guess wild values. Just log it.
-        if initial_stake < 10.0:
-             logger.debug(f"{pair}: Initial stake {initial_stake} seems low. Trade history: {len(trade.orders)} orders.")
-
         # --- Safe Custom Data Handling ---
         state_data = trade.get_custom_data('state_data') or {}
         last_forced_candle = trade.get_custom_data('last_forced_candle') or -1
@@ -3942,24 +3808,24 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
                 if total_wallet_balance > 0:
                     max_allowed_stake = total_wallet_balance * self.max_wallet_exposure.value
-
+                    
                     if current_total_stake > (max_allowed_stake * 0.95) and current_profit > self.emergency_capital_release_profit_trigger.value:
-                        # Use current stake for reduction calculation as we are reducing exposure
                         sell_stake_amount = trade.stake_amount * self.emergency_capital_release_sell_pct.value
 
                         # --- Min Stake Check ---
-                        if sell_stake_amount < (min_stake if min_stake else 0):
+                        if sell_stake_amount < min_stake:
                             logger.warning(
                                 f"CAPITAL MGMT: Emergency sell for {trade.pair} skipped. "
-                                f"Amount {sell_stake_amount:.2f} USD is below min_stake {min_stake} USD."
+                                f"Amount {sell_stake_amount:.2f} USD is below min_stake {min_stake:.2f} USD."
                             )
-                        else:
-                            sell_crypto_amount = sell_stake_amount / current_rate
-                            logger.warning(
-                                f"CAPITAL MGMT: Emergency capital release for {trade.pair}. "
-                                f"Wallet exposure at {current_total_stake/total_wallet_balance:.1%}. Selling {sell_stake_amount:.2f} USD."
-                            )
-                            return -sell_crypto_amount
+                            return None
+
+                        sell_crypto_amount = sell_stake_amount / current_rate
+                        logger.warning(
+                            f"CAPITAL MGMT: Emergency capital release for {trade.pair}. "
+                            f"Wallet exposure at {current_total_stake/total_wallet_balance:.1%}. Selling {sell_stake_amount:.2f} USD."
+                        )
+                        return -sell_crypto_amount
             except Exception as e:
                 logger.error(f"Error in emergency capital release logic: {e}")
 
@@ -3973,80 +3839,62 @@ class GKD_Galaxy_v1_1h(IStrategy):
                     open_candle_iloc = dataframe.index.get_loc(open_candle_series.index[0])
                     current_candle_iloc = len(dataframe) - 1
                     candles_since_open = current_candle_iloc - open_candle_iloc
-
+                    
                     if (candles_since_open > 0) and (candles_since_open % self.forced_exit_period.value == 0) and (candles_since_open != last_forced_candle):
                         trade.set_custom_data('last_forced_candle', candles_since_open)
+                        
+                        if self.replenish_enabled.value and (trade.amount * current_rate) < self.replenish_stake_threshold_usd.value:
+                            # Calculate initial stake from order history
+                            try:
+                                # Get first buy order
+                                filled_buy_orders = [
+                                    o for o in trade.orders
+                                    if o.ft_order_side == 'buy' and o.status == 'closed'
+                                ]
+                                if filled_buy_orders:
+                                    # Sort by date just in case, though order usually preserved
+                                    filled_buy_orders.sort(key=lambda x: x.order_date)
+                                    initial_order = filled_buy_orders[0]
 
-                        # 1. Replenish if Profit & Low Stake
-                        # User requirement: "if trade is in profit but the current stake amout is too low ... to do a replenish"
-                        # Use AceVault-stored initial_stake for amount.
-                        current_value = trade.stake_amount * (1 + current_profit)
-                        if self.replenish_enabled.value and current_profit > 0 and current_value < self.replenish_stake_threshold_usd.value:
-                            replenish_amount = initial_stake * self.replenish_stake_pct.value
+                                    # Use cost (Notional Value)
+                                    notional_value = initial_order.cost if initial_order.cost else (initial_order.stake_amount or initial_order.amount * initial_order.price)
 
-                            # Safety: Ensure we don't violate max_stake
-                            if max_stake and (trade.stake_amount + replenish_amount) > max_stake:
-                                replenish_amount = max_stake - trade.stake_amount
+                                    # Adjust for leverage to get actual wallet stake used
+                                    # Order.cost in futures is usually the Notional Value (Size), so we divide by leverage
+                                    current_leverage = trade.leverage if trade.leverage else 1.0
+                                    base_stake = notional_value / current_leverage
+                                else:
+                                    base_stake = trade.stake_amount
+                            except Exception as e:
+                                logger.error(f"Error calculating initial stake for replenishment: {e}")
+                                # Fallback to current stake if any error
+                                base_stake = trade.stake_amount
 
-                            if replenish_amount > 0:
-                                logger.info(f"FORCED REPLENISH: {trade.pair} low stake & profit. Adding {replenish_amount:.2f} USD.")
-                                self._send_adjustment_notification(trade, "Forced Replenish", replenish_amount, current_rate, current_profit)
-                                return replenish_amount
+                            replenish_amount = base_stake * self.replenish_stake_pct.value
+                            logger.info(f"FORCED REPLENISH: {trade.pair} low stake. Adding {replenish_amount:.2f} USD.")
+                            self._send_adjustment_notification(trade, "Forced Replenish", replenish_amount, current_rate, current_profit)
+                            return replenish_amount
 
-                        # 2. Forced Profit Exit
-                        # "if the trade is in more than 10% profit to do a partial exit of 10% of the initial stake"
                         if current_profit > self.forced_exit_profit_trigger.value:
-                            sell_stake_amount = initial_stake * self.forced_exit_sell_pct.value
+                            sell_stake_amount = trade.stake_amount * self.forced_exit_sell_pct.value
+                            sell_crypto_amount = sell_stake_amount / current_rate
+                            logger.info(f"FORCED EXIT (PROFIT): {trade.pair} at {current_profit:.2%}. Selling {sell_stake_amount:.2f} USD.")
+                            self._send_adjustment_notification(trade, "Forced Profit Exit", sell_crypto_amount, current_rate, current_profit)
+                            return -sell_crypto_amount
 
-                            # Check if we have enough to sell
-                            if trade.stake_amount < sell_stake_amount:
-                                sell_stake_amount = trade.stake_amount * 0.99
-
-                            if sell_stake_amount > (min_stake if min_stake else 0):
-                                logger.info(f"FORCED EXIT (PROFIT): {trade.pair} at {current_profit:.2%}. Selling {sell_stake_amount:.2f} USD.")
-                                self._send_adjustment_notification(trade, "Forced Profit Exit", -sell_stake_amount, current_rate, current_profit)
-                                return -sell_stake_amount
-
-                        # 3. Forced DCA (Loss)
-                        # "if trade is at loss and loss greater than -10% to do a 10% DCA of the initial stake"
                         if current_profit < self.forced_exit_loss_trigger.value:
-                            buy_stake_amount = initial_stake * self.forced_exit_buy_pct.value
-
-                            if max_stake and (trade.stake_amount + buy_stake_amount) > max_stake:
-                                buy_stake_amount = max_stake - trade.stake_amount
-
-                            if buy_stake_amount > 0:
-                                logger.info(f"FORCED DCA (LOSS): {trade.pair} at {current_profit:.2%}. Buying {buy_stake_amount:.2f} USD.")
-                                self._send_adjustment_notification(trade, "Forced DCA", buy_stake_amount, current_rate, current_profit)
-                                return buy_stake_amount
+                            buy_stake_amount = trade.stake_amount * self.forced_exit_buy_pct.value
+                            logger.info(f"FORCED DCA (LOSS): {trade.pair} at {current_profit:.2%}. Buying {buy_stake_amount:.2f} USD.")
+                            self._send_adjustment_notification(trade, "Forced DCA", buy_stake_amount, current_rate, current_profit)
+                            return buy_stake_amount
             except Exception as e:
                 logger.error(f"Error in 3-candle forced decision logic for {trade.pair}: {e}")
-
-        # -------------------- Low Stake Replenishment (AceVault Addon) --------------------
-        if self.replenish_enabled.value:
-            try:
-                # Estimate current value in USD
-                current_value = trade.stake_amount * (1 + current_profit)
-                
-                if current_value < float(self.replenish_stake_threshold_usd.value):
-                    # Replenish with % of INITIAL stake (AceVault Logic)
-                    replenish_amount = initial_stake * float(self.replenish_stake_pct.value)
-
-                    # Safety: Ensure we don't violate max_stake
-                    if max_stake and (trade.stake_amount + replenish_amount) > max_stake:
-                         replenish_amount = max_stake - trade.stake_amount
-
-                    if replenish_amount > 0:
-                        self._send_adjustment_notification(trade, "replenish", replenish_amount, current_rate, current_profit)
-                        return replenish_amount
-            except Exception as e:
-                logger.error(f"Error in Low Stake Replenishment for {pair}: {e}")
 
         # --- State Machine Initialization ---
         original_state_data = state_data.copy()
         if not isinstance(state_data, dict) or 'trade_state' not in state_data:
             state_data = {'trade_state': 'INITIAL', 'last_adjustment_hour': -1, 'position_adjustment_count': 0}
-
+        
         # Ensure effective_dca_count exists for backward compatibility
         if 'effective_dca_count' not in state_data:
             state_data['effective_dca_count'] = trade.nr_of_successful_buys - 1
@@ -4072,7 +3920,146 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
         return result
 
-    def order_filled(self, pair: str, trade: Trade, order: "Order", current_time: datetime, **kwargs) -> None:
+    def _handle_initial_state(self, trade: Trade, current_profit: float, state_data: dict):
+        if current_profit < self.initial_loss_trigger.value:
+            state_data['trade_state'] = 'DEFENDING'
+            state_data['last_dca_loss_level'] = 0.0  # Initialize loss level tracker
+            logger.info(f"Transitioning {trade.pair} to DEFENDING state.")
+        elif current_profit > self.initial_profit_trigger.value:
+            state_data['trade_state'] = 'PROFIT'
+            state_data['last_profit_exit_level'] = 0.0
+            logger.info(f"Transitioning {trade.pair} to PROFIT state.")
+
+    def _handle_defending_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+        effective_dca_count = state_data.get('effective_dca_count', trade.nr_of_successful_buys - 1)
+
+        if effective_dca_count >= self.defending_max_dca.value:
+            state_data['trade_state'] = 'MAX_DCA'
+            logger.info(f"Transitioning {trade.pair} to MAX_DCA state (effective DCA count: {effective_dca_count}).")
+            return None
+
+        # --- Progressive DCA Logic (based on initial stake) ---
+        last_dca_loss_level = state_data.get('last_dca_loss_level', 0.0)
+        next_dca_trigger = last_dca_loss_level + self.progressive_loss_trigger.value
+
+        if current_profit < next_dca_trigger:
+            dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+            if not dataframe.empty:
+                last_candle = dataframe.iloc[-1]
+                ml_conf = last_candle.get('ml_confidence', 0.5)
+                
+                should_dca = (
+                    ((not trade.is_short and last_candle.get('enter_long', 0) == 1) or
+                    (trade.is_short and last_candle.get('enter_short', 0) == 1))
+                    and ml_conf > self.dca_ml_conf_threshold.value
+                )
+                
+                if should_dca:
+                    dca_amount = trade.stake_amount * self.progressive_buy_pct.value
+                    
+                    if self.capital_management_enabled.value:
+                        try:
+                            currency = trade.stake_currency
+                            total_wallet_balance = self._get_total_wallet_balance(currency)
+                            current_total_stake = self._get_current_total_stake(currency)
+
+                            if total_wallet_balance > 0:
+                                max_allowed_stake = total_wallet_balance * self.max_wallet_exposure.value
+                                if current_total_stake + dca_amount > max_allowed_stake:
+                                    logger.warning(f"CAPITAL MGMT: DCA for {trade.pair} blocked.")
+                                    return None
+                        except Exception as e:
+                            logger.error(f"Error in capital management check (DCA): {e}")
+
+                    state_data['last_dca_loss_level'] = next_dca_trigger
+                    state_data['effective_dca_count'] = effective_dca_count + 1
+                    logger.info(f"DEFENDING state: Progressive DCA for {trade.pair}, adding {dca_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
+                    self._send_adjustment_notification(trade, "Progressive DCA", dca_amount, current_rate, current_profit)
+                    return dca_amount
+                else:
+                    logger.info(f"DEFENDING state: DCA for {trade.pair} skipped, ML signal/confidence not met.")
+        
+        return None
+
+    def _handle_profit_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+        last_profit_level = state_data.get('last_profit_exit_level', 0.0)
+        next_profit_trigger = last_profit_level + self.progressive_profit_trigger.value
+
+        if current_profit > next_profit_trigger:
+            if state_data.get('position_adjustment_count', 0) < self.profit_max_position_adjustment.value:
+                sell_stake_amount = trade.stake_amount * self.progressive_sell_pct.value
+                state_data['position_adjustment_count'] += 1
+                state_data['last_profit_exit_level'] = next_profit_trigger
+                
+                # Decrement effective DCA count, with a floor of 0
+                effective_dca_count = state_data.get('effective_dca_count', 0)
+                if effective_dca_count > 0:
+                    state_data['effective_dca_count'] = effective_dca_count - 1
+                
+                logger.info(f"PROFIT state: Progressive partial exit for {trade.pair}, selling {sell_stake_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
+                sell_crypto_amount = sell_stake_amount / current_rate
+                self._send_adjustment_notification(trade, "Progressive Profit Exit", sell_crypto_amount, current_rate, current_profit)
+                return -sell_crypto_amount
+
+        current_stake_usd = trade.amount * current_rate
+        if current_stake_usd < trade.stake_amount * self.profit_reload_threshold.value and last_profit_level > 0:
+            if current_profit < last_profit_level:
+                try:
+                    dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
+                    if not dataframe.empty:
+                        last_candle = dataframe.iloc[-1]
+                        ml_conf = last_candle.get('ml_confidence', 0.5)
+                        if ((not trade.is_short and last_candle['enter_long'] == 1) or
+                            (trade.is_short and last_candle['enter_short'] == 1)) and \
+                           ml_conf > self.dca_ml_conf_threshold.value:
+                            
+                            dca_amount = trade.stake_amount * self.profit_dca_multiplier.value
+                            if self.capital_management_enabled.value:
+                                try:
+                                    currency = trade.stake_currency
+                                    total_wallet_balance = self._get_total_wallet_balance(currency)
+                                    current_total_stake = self._get_current_total_stake(currency)
+
+                                    if total_wallet_balance > 0:
+                                        max_allowed_stake = total_wallet_balance * self.max_wallet_exposure.value
+                                        if current_total_stake + dca_amount > max_allowed_stake:
+                                            logger.warning(f"CAPITAL MGMT: Reload for {trade.pair} blocked.")
+                                            return None
+                                except Exception as e:
+                                    logger.error(f"Error in capital management check (Reload): {e}")
+
+                            logger.info(f"PROFIT state: Reloading position for {trade.pair}.")
+                            state_data['last_profit_exit_level'] = 0.0
+                            self._send_adjustment_notification(trade, "Position Reload", dca_amount, current_rate, current_profit)
+                            return dca_amount
+                except Exception as e:
+                    logger.error(f"Error in reload decision for {trade.pair}: {e}")
+        return None
+
+    def _handle_max_dca_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+        if current_profit > self.max_dca_take_profit_pct.value:
+            sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
+            logger.info(f"MAX_DCA state: Taking profit for {trade.pair}, selling {sell_amount_crypto}")
+            self._send_adjustment_notification(trade, "Max_DCA Profit Take", sell_amount_crypto, current_rate, current_profit)
+            return -sell_amount_crypto
+        
+        # De-risking for losing trades that hit max DCA
+        if current_profit < 0:
+            sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
+            logger.warning(f"MAX_DCA state: De-risking losing trade for {trade.pair}. Selling {sell_amount_crypto:.8f} ({self.max_dca_sell_amount_pct.value:.0%})")
+            
+            # Decrement DCA count and reset state to allow "unstucking"
+            state_data['effective_dca_count'] = state_data.get('effective_dca_count', self.defending_max_dca.value) - 1
+            state_data['trade_state'] = 'DEFENDING'
+            logger.info(f"Transitioning {trade.pair} back to DEFENDING. New effective DCA count: {state_data['effective_dca_count']}")
+
+            self._send_adjustment_notification(trade, "Max_DCA De-Risk", sell_amount_crypto, current_rate, current_profit)
+            return -sell_amount_crypto
+
+        logger.debug(f"MAX_DCA state: Holding {trade.pair} at {current_profit:.2%}, waiting for profit > {self.max_dca_take_profit_pct.value:.2%} or loss to de-risk.")
+        return None
+    
+    def order_filled(self, pair: str, trade: Trade, order: 'Order', current_time: datetime, **kwargs) -> None:
         """
         🔥 NEW: Called when an order is filled (including exit orders).
         This is the CORRECT place to track trade performance!
@@ -4219,61 +4206,6 @@ class GKD_Galaxy_v1_1h(IStrategy):
         return True
     
     def bot_loop_start(self, **kwargs):
-        # -------------------- AceVault Equity Logging --------------------
-        current_time = datetime.now(timezone.utc)
-        # Rispetta intervallo di logging
-        try:
-            gap = timedelta(minutes=float(self.equity_log_interval_minutes.value))
-        except Exception:
-            gap = timedelta(minutes=5)
-
-        if self._last_equity_log_time and (current_time - self._last_equity_log_time) < gap:
-            pass # Skip logging if interval not met
-        else:
-            # Calcola equity proxy (wallet + PnL non-realizzato)
-            equity_est = self._compute_equity_proxy(current_time)
-
-            # Wallet corrente (stake currency)
-            total_wallet = 0.0
-            try:
-                if hasattr(self, 'wallets') and self.wallets is not None:
-                    total_wallet = float(self.wallets.get_total_stake_amount())
-            except Exception:
-                total_wallet = 0.0
-
-            # Margine utilizzato dalle posizioni aperte (stake currency)
-            used_margin = self._compute_used_margin(current_time)
-            used_pct = (used_margin / total_wallet) if total_wallet > 0 else 0.0
-
-            # Soglia di warning: percentuale del balance corrente (non dell'initial balance)
-            warn_threshold = float(total_wallet) * float(self.equity_warn_ratio.value)
-
-            # Log su console
-            try:
-                logging.getLogger(__name__).info(
-                    (
-                        f"[EquityLog] time={current_time} "
-                        f"equity_est={equity_est:.4f} "
-                        f"total_wallet={total_wallet:.4f} "
-                        f"warn_thr={warn_threshold:.4f} "
-                        f"used_margin={used_margin:.4f} "
-                        f"used_pct={used_pct:.4%} "
-                        f"target_margin_pct={float(self.total_margin_target.value):.4f}"
-                    )
-                )
-            except Exception:
-                pass
-
-            # Se sotto soglia, logga warning (solo informativo)
-            if warn_threshold > 0 and equity_est <= warn_threshold:
-                try:
-                    logging.getLogger(__name__).warning(
-                        f"[EquityAlert] equity_est {equity_est:.4f} sotto soglia {warn_threshold:.4f}. Considera ridurre leva/add."
-                    )
-                except Exception:
-                    pass
-
-            self._last_equity_log_time = current_time
         """Check for retraining needs + hourly status updates + V66 Trend ML Training + DB Sync"""
         # Retraining check
         if hasattr(self, '_needs_retraining') and self._needs_retraining:
@@ -4573,13 +4505,6 @@ class GKD_Galaxy_v1_1h(IStrategy):
                  logger.info(f"💰 STAKE: {pair} {entry_tag} | ML={ml_conf:.0%} Q={quality_score:.0f} "
                            f"→ Ideal: {ideal_stake:.2f} → Final: {final_stake:.2f} USDT")
 
-            # -------------------- AceVault Leverage Tracking --------------------
-            try:
-                st = self._state.setdefault(pair, {})
-                st["last_leverage"] = float(leverage) if leverage is not None else float(self._dynamic_leverage(pair))
-                st['initial_stake'] = final_stake
-            except Exception:
-                pass
             return final_stake
             
         except Exception as e:
@@ -4677,376 +4602,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
         
         return min(2.0, max_leverage)  # Safe fallback
     
-    # ------------------------- Leverage per futures (AceVault) -------------------------
-    def _dynamic_leverage(self, pair: str) -> float:
-        st = self._pair_state(pair)
-        atr_pct = st.get('last_atr_pct', None)
-        if atr_pct is None or math.isnan(atr_pct) or atr_pct <= 0:
-            return 3.0
-
-        is_btc = 'BTC' in pair.upper()
-        is_eth = 'ETH' in pair.upper()
-        # Mappatura soglie: low vol → leva alta; high vol → leva bassa
-        if atr_pct <= 0.003:  # ~0.3% giornaliero su 5m medio (bassa volatilità)
-            lev = 40 if is_btc else 30 if is_eth else 20
-        elif atr_pct <= 0.005:
-            lev = 30 if is_btc else 20 if is_eth else 15
-        elif atr_pct <= 0.010:
-            lev = 20 if is_btc else 15 if is_eth else 10
-        elif atr_pct <= 0.020:
-            lev = 15 if is_btc else 10 if is_eth else 7
-        elif atr_pct <= 0.040:
-            lev = 10 if is_btc else 8 if is_eth else 5
-        else:
-            lev = 7 if is_btc else 5 if is_eth else 3
-
-        # Applica cap configurabili
-        if is_btc:
-            lev = float(min(lev, int(self.btc_leverage_cap.value)))
-        else:
-            lev = float(min(lev, int(self.non_btc_leverage_cap.value)))
-        lev = float(min(lev, int(self.max_leverage.value)))
-        # Arrotonda a intero per evitare leva con virgola
-        return int(round(max(1.0, lev)))
-
-    def _pair_state(self, pair: str):
-        st = self.custom_info.get(pair)
-        if not st:
-            st = {
-                'grid': None,
-                'next_add_idx': 0,
-                'next_reduce_idx': 0,
-            }
-            self.custom_info[pair] = st
-        return st
-
-    def _get_trade_leverage(self, tr: Trade) -> float:
-        """Restituisce la leverage da usare per i calcoli.
-        Ordine di priorità:
-        1) Attribute del Trade (se presente)
-        2) Stato della strategia per il pair (last_leverage)
-        3) Leverage dinamica calcolata dal pair
-        4) Fallback a fixed_leverage
-        """
-        try:
-            if hasattr(tr, 'leverage') and tr.leverage is not None:
-                return max(1.0, float(tr.leverage))
-        except Exception:
-            pass
-
-        try:
-            st = self._pair_state(tr.pair)
-            lev_st = st.get('last_leverage')
-            if lev_st is not None:
-                return max(1.0, float(lev_st))
-        except Exception:
-            pass
-
-        try:
-            dyn = float(self._dynamic_leverage(tr.pair))
-            return max(1.0, dyn)
-        except Exception:
-            return max(1.0, float(self.fixed_leverage.value))
-
-    def _get_last_order_time(self, trade: Trade, side: str) -> Optional[datetime]:
-        """Recupera l'ultimo timestamp di ordine per il trade dato lato ('buy' o 'sell').
-        Cerca di inferire i campi datetime disponibili negli oggetti ordine.
-        Ritorna None se non disponibile.
-        """
-        side_l = (side or '').lower()
-        try:
-            orders = getattr(trade, 'orders', None)
-        except Exception:
-            orders = None
-        if not orders:
-            return None
-
-        def _get_dt(o) -> Optional[datetime]:
-            for attr in ['order_date', 'open_date', 'timestamp', 'created_at', 'date', 'time', 'filled_time']:
-                try:
-                    val = getattr(o, attr, None)
-                except Exception:
-                    val = None
-                if isinstance(val, datetime):
-                    return val
-            return None
-
-        def _get_side(o) -> Optional[str]:
-            for attr in ['side', 'ft_order_side', 'action', 'order_side']:
-                try:
-                    val = getattr(o, attr, None)
-                except Exception:
-                    val = None
-                if isinstance(val, str) and val:
-                    return val.lower()
-            # Heuristic: if amount is positive -> buy, negative -> sell
-            try:
-                amt = getattr(o, 'amount', None)
-                if isinstance(amt, (int, float)):
-                    return 'buy' if float(amt) >= 0 else 'sell'
-            except Exception:
-                pass
-            return None
-
-        last_dt: Optional[datetime] = None
-        for o in list(orders):
-            oside = _get_side(o)
-            if oside is None:
-                continue
-            if oside != side_l:
-                continue
-            odt = _get_dt(o)
-            if odt is None:
-                continue
-            if (last_dt is None) or (odt > last_dt):
-                last_dt = odt
-        return last_dt
-
-    def _normalize_dt(self, dt: Optional[datetime], ref: datetime) -> Optional[datetime]:
-        """Normalizza un datetime alla stessa timezone del riferimento.
-        - Se dt è naive (senza tzinfo), applica la tz di ref (o UTC se non disponibile).
-        - Se dt ha una tz diversa, lo converte alla tz di ref.
-        - Se dt è None o non è un datetime, ritorna None.
-        """
-        if not isinstance(dt, datetime):
-            return None
-        try:
-            ref_tz = getattr(ref, 'tzinfo', None)
-            # Naive -> assegna tz di ref (o UTC)
-            if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
-                return dt.replace(tzinfo=ref_tz or timezone.utc)
-            # Aware con tz diversa -> converti
-            if ref_tz and dt.tzinfo != ref_tz:
-                return dt.astimezone(ref_tz)
-        except Exception:
-            pass
-        return dt
-
-    def _compute_equity_proxy(self, current_time: datetime) -> float:
-        """Stima equity: wallet totale (stake currency) + somma PnL non-realizzato dei trade aperti.
-        PnL per trade: stake_amount * profit_ratio (calcolato al prezzo corrente, se disponibile).
-        """
-        total_wallet = 0.0
-        try:
-            if hasattr(self, 'wallets') and self.wallets is not None:
-                total_wallet = float(self.wallets.get_total_stake_amount())
-        except Exception:
-            total_wallet = 0.0
-
-        # Somma PnL non-realizzato
-        unrealized_sum = 0.0
-        try:
-            open_trades = Trade.get_open_trades()
-        except Exception:
-            open_trades = []
-
-        for tr in open_trades:
-            try:
-                pair = tr.pair
-                # Ottieni un rate corrente — fallback a ultimo open_rate se non disponibile
-                current_rate = None
-                try:
-                    if hasattr(self, 'dp') and self.dp is not None:
-                        if hasattr(self.dp, 'get_pair_rate'):
-                            current_rate = float(self.dp.get_pair_rate(pair, self.timeframe))
-                        else:
-                            df = self.dp.get_pair_dataframe(pair=pair, timeframe=self.timeframe)
-                            if df is not None and len(df) > 0:
-                                current_rate = float(df['close'].iloc[-1])
-                except Exception:
-                    current_rate = None
-
-                if current_rate is None or current_rate <= 0:
-                    current_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-
-                # Calcola ratio di profitto se possibile
-                profit_ratio = 0.0
-                try:
-                    if hasattr(tr, 'calc_profit_ratio'):
-                        profit_ratio = float(tr.calc_profit_ratio(current_rate))
-                    else:
-                        # Fallback semplice: stima PnL in base al lato
-                        is_short = getattr(tr, 'is_short', False)
-                        open_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-                        if open_rate > 0 and current_rate > 0:
-                            if is_short:
-                                profit_ratio = (open_rate - current_rate) / open_rate
-                            else:
-                                profit_ratio = (current_rate - open_rate) / open_rate
-                except Exception:
-                    profit_ratio = 0.0
-
-                stake_amt = float(getattr(tr, 'stake_amount', 0.0) or 0.0)
-                unrealized_sum += stake_amt * profit_ratio
-            except Exception:
-                continue
-
-        return float(total_wallet + unrealized_sum)
-
-    def _compute_used_margin(self, current_time: datetime) -> float:
-        """Calcola il margine utilizzato (stake currency) sommando l'esposizione attuale
-        di tutti i trade aperti: exposure ≈ amount_tokens * current_rate / leverage.
-        """
-        used = 0.0
-        try:
-            open_trades = Trade.get_open_trades()
-        except Exception:
-            open_trades = []
-
-        for tr in open_trades:
-            try:
-                pair = tr.pair
-                # Ottieni rate corrente
-                current_rate = None
-                try:
-                    if hasattr(self, 'dp') and self.dp is not None:
-                        if hasattr(self.dp, 'get_pair_rate'):
-                            current_rate = float(self.dp.get_pair_rate(pair, self.timeframe))
-                        else:
-                            df = self.dp.get_pair_dataframe(pair=pair, timeframe=self.timeframe)
-                            if df is not None and len(df) > 0:
-                                current_rate = float(df['close'].iloc[-1])
-                except Exception:
-                    current_rate = None
-
-                if current_rate is None or current_rate <= 0:
-                    current_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-
-                amount_tokens = float(getattr(tr, 'amount', 0.0) or 0.0)
-                lev = self._get_trade_leverage(tr)
-                exposure = amount_tokens * current_rate / lev
-                used += float(max(0.0, exposure))
-            except Exception:
-                continue
-
-        return float(used)
-
-    def _compute_used_margin_by_side(self, current_time: datetime) -> tuple[float, float]:
-        """Calcola il margine utilizzato separato per LONG e SHORT.
-        Ritorna: (used_long, used_short) in stake currency.
-        exposure ≈ amount_tokens * current_rate / leverage.
-        """
-        used_long = 0.0
-        used_short = 0.0
-        try:
-            open_trades = Trade.get_open_trades()
-        except Exception:
-            open_trades = []
-
-        for tr in open_trades:
-            try:
-                pair = tr.pair
-                # Ottieni rate corrente
-                current_rate = None
-                try:
-                    if hasattr(self, 'dp') and self.dp is not None:
-                        if hasattr(self.dp, 'get_pair_rate'):
-                            current_rate = float(self.dp.get_pair_rate(pair, self.timeframe))
-                        else:
-                            df = self.dp.get_pair_dataframe(pair=pair, timeframe=self.timeframe)
-                            if df is not None and len(df) > 0:
-                                current_rate = float(df['close'].iloc[-1])
-                except Exception:
-                    current_rate = None
-
-                if current_rate is None or current_rate <= 0:
-                    current_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-
-                amount_tokens = float(getattr(tr, 'amount', 0.0) or 0.0)
-                lev = self._get_trade_leverage(tr)
-                exposure = amount_tokens * current_rate / max(1.0, float(lev))
-                if getattr(tr, 'is_short', False):
-                    used_short += float(max(0.0, exposure))
-                else:
-                    used_long += float(max(0.0, exposure))
-            except Exception:
-                continue
-
-        return float(used_long), float(used_short)
-
-    def _compute_unrealized_pnl_by_side(self, current_time: datetime) -> tuple[float, float]:
-        """Stima il PnL non realizzato separato per LONG e SHORT (in stake currency).
-        Usa profit_ratio basato su rate corrente vs open_rate.
-        """
-        pnl_long = 0.0
-        pnl_short = 0.0
-        try:
-            open_trades = Trade.get_open_trades()
-        except Exception:
-            open_trades = []
-
-        for tr in open_trades:
-            try:
-                pair = tr.pair
-                current_rate = None
-                try:
-                    if hasattr(self, 'dp') and self.dp is not None:
-                        if hasattr(self.dp, 'get_pair_rate'):
-                            current_rate = float(self.dp.get_pair_rate(pair, self.timeframe))
-                        else:
-                            df = self.dp.get_pair_dataframe(pair=pair, timeframe=self.timeframe)
-                            if df is not None and len(df) > 0:
-                                current_rate = float(df['close'].iloc[-1])
-                except Exception:
-                    current_rate = None
-
-                if current_rate is None or current_rate <= 0.0:
-                    current_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-
-                profit_ratio = 0.0
-                try:
-                    if hasattr(tr, 'calc_profit_ratio'):
-                        profit_ratio = float(tr.calc_profit_ratio(current_rate))
-                    else:
-                        is_short = getattr(tr, 'is_short', False)
-                        open_rate = float(getattr(tr, 'open_rate', 0.0) or 0.0)
-                        if open_rate > 0 and current_rate > 0:
-                            if is_short:
-                                profit_ratio = (open_rate - current_rate) / open_rate
-                            else:
-                                profit_ratio = (current_rate - open_rate) / open_rate
-                except Exception:
-                    profit_ratio = 0.0
-
-                stake_amt = float(getattr(tr, 'stake_amount', 0.0) or 0.0)
-                pnl_val = stake_amt * profit_ratio
-                if getattr(tr, 'is_short', False):
-                    pnl_short += pnl_val
-                else:
-                    pnl_long += pnl_val
-            except Exception:
-                continue
-
-        return float(pnl_long), float(pnl_short)
-
     def bot_start(self, **kwargs):
-        # -------------------- AceVault Initialization --------------------
-        CORE_LONG_SYMBOL_HINTS = ['BTC/', 'ETH/', 'HYPE/']
-        wl = []
-        try:
-            if hasattr(self, 'dp') and self.dp is not None:
-                wl = list(getattr(self.dp, 'current_whitelist', []) or [])
-        except Exception:
-            wl = []
-
-        mapped = {}
-        for hint in CORE_LONG_SYMBOL_HINTS:
-            cand = next((p for p in wl if p.upper().startswith(hint.replace('/', '/').upper())), None)
-            if cand:
-                mapped[hint] = cand
-        # Fallback: use common naming if not found
-        self._core_pairs = {
-            'BTC': mapped.get('BTC/', 'BTC/USDC:USDC'),
-            'ETH': mapped.get('ETH/', 'ETH/USDC:USDC'),
-            'HYPE': mapped.get('HYPE/', 'HYPE/USDC:USDC'),
-        }
-
-        # Memorize initial wallet for equity alert threshold
-        try:
-            if hasattr(self, 'wallets') and self.wallets is not None:
-                self._initial_wallet = float(self.wallets.get_total_stake_amount())
-        except Exception:
-            self._initial_wallet = 0.0
         """
         Log system status on start + AUTO-TRAIN Trend ML models
         
@@ -5476,22 +5032,21 @@ class GKD_Galaxy_v1_1h(IStrategy):
             consecutive_losses = pair_stats.get('consecutive_losses', 0)
 
             # Format the message using Markdown
-            # Note: Telegram Markdown V1 uses single * for bold.
             message = (
                 f"{action_emoji} *Trade Adjustment*\n\n"
-                f"*Pair:* `{trade.pair}`\n"
-                f"*Action:* {adjustment_type.upper()}\n"
-                f"*Amount:* `{abs(amount):.4f}`\n\n"
-                f"--- *Trade Status* ---\n"
-                f"*{profit_str}* {profit_usd_str}\n"
-                f"*Entries:* `{trade.nr_of_successful_buys}`\n"
-                f"*Stake:* `{trade.stake_amount:.2f}` USD\n"
-                f"*Avg Entry:* `{trade.open_rate:.4f}`\n"
-                f"*Current Rate:* `{current_rate:.4f}`\n\n"
-                f"--- *Pair Performance* ---\n"
-                f"*Win Rate:* `{win_rate:.1%}`\n"
-                f"*Avg P/L:* `{avg_profit:.2%}`\n"
-                f"*Consecutive Losses:* `{consecutive_losses}`\n"
+                f"**Pair:** `{trade.pair}`\n"
+                f"**Action:** {adjustment_type.upper()}\n"
+                f"**Amount:** `{abs(amount):.4f}`\n\n"
+                f"--- **Trade Status** ---\n"
+                f"**{profit_str}** {profit_usd_str}\n"
+                f"**Entries:** `{trade.nr_of_successful_buys}`\n"
+                f"**Stake:** `{trade.stake_amount:.2f}` USD\n"
+                f"**Avg Entry:** `{trade.open_rate:.4f}`\n"
+                f"**Current Rate:** `{current_rate:.4f}`\n\n"
+                f"--- **Pair Performance** ---\n"
+                f"**Win Rate:** `{win_rate:.1%}`\n"
+                f"**Avg P/L:** `{avg_profit:.2%}`\n"
+                f"**Consecutive Losses:** `{consecutive_losses}`\n"
             )
             
             # Freqtrade's method to send telegram messages
@@ -5538,184 +5093,3 @@ class GKD_Galaxy_v1_1h(IStrategy):
             logger.error(f"Error in _train_trend_models: {e}")
 
 
-    def _handle_initial_state(self, trade: Trade, current_profit: float, state_data: dict):
-        if current_profit < self.initial_loss_trigger.value:
-            state_data['trade_state'] = 'DEFENDING'
-            state_data['last_dca_loss_level'] = 0.0  # Initialize loss level tracker
-            logger.info(f"Transitioning {trade.pair} to DEFENDING state.")
-        elif current_profit > self.initial_profit_trigger.value:
-            state_data['trade_state'] = 'PROFIT'
-            state_data['last_profit_exit_level'] = 0.0
-            logger.info(f"Transitioning {trade.pair} to PROFIT state.")
-
-    def _handle_defending_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
-        # Use stored initial_stake
-        st = self._state.get(trade.pair, {})
-        initial_stake = float(st.get('initial_stake', trade.stake_amount))
-
-        effective_dca_count = state_data.get('effective_dca_count', trade.nr_of_successful_buys - 1)
-
-        if effective_dca_count >= self.defending_max_dca.value:
-            state_data['trade_state'] = 'MAX_DCA'
-            logger.info(f"Transitioning {trade.pair} to MAX_DCA state (effective DCA count: {effective_dca_count}).")
-            return None
-
-        # --- Progressive DCA Logic (based on initial stake) ---
-        last_dca_loss_level = state_data.get('last_dca_loss_level', 0.0)
-        next_dca_trigger = last_dca_loss_level + self.progressive_loss_trigger.value
-
-        if current_profit < next_dca_trigger:
-            dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
-            if not dataframe.empty:
-                last_candle = dataframe.iloc[-1]
-                ml_conf = last_candle.get('ml_confidence', 0.1)
-
-                should_dca = (
-                    ((not trade.is_short and last_candle.get('enter_long', 0) == 1) or
-                    (trade.is_short and last_candle.get('enter_short', 0) == 1))
-                    and ml_conf > self.dca_ml_conf_threshold.value
-                )
-
-                if should_dca:
-                    dca_amount = initial_stake * self.progressive_buy_pct.value
-
-                    if self.capital_management_enabled.value:
-                        try:
-                            currency = trade.stake_currency
-                            total_wallet_balance = self._get_total_wallet_balance(currency)
-                            current_total_stake = self._get_current_total_stake(currency)
-
-                            if total_wallet_balance > 0:
-                                max_allowed_stake = total_wallet_balance * self.max_wallet_exposure.value
-                                if current_total_stake + dca_amount > max_allowed_stake:
-                                    logger.warning(f"CAPITAL MGMT: DCA for {trade.pair} blocked.")
-                                    return None
-                        except Exception as e:
-                            logger.error(f"Error in capital management check (DCA): {e}")
-
-                    state_data['last_dca_loss_level'] = next_dca_trigger
-                    state_data['effective_dca_count'] = effective_dca_count + 1
-                    logger.info(f"DEFENDING state: Progressive DCA for {trade.pair}, adding {dca_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
-                    self._send_adjustment_notification(trade, "Progressive DCA", dca_amount, current_rate, current_profit)
-                    return dca_amount
-                else:
-                    logger.info(f"DEFENDING state: DCA for {trade.pair} skipped, ML signal/confidence not met.")
-
-        return None
-
-    def _handle_profit_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
-        # Use stored initial_stake
-        st = self._state.get(trade.pair, {})
-        initial_stake = float(st.get('initial_stake', trade.stake_amount))
-
-        last_profit_level = state_data.get('last_profit_exit_level', 0.0)
-        next_profit_trigger = last_profit_level + self.progressive_profit_trigger.value
-
-        if current_profit > next_profit_trigger:
-            if state_data.get('position_adjustment_count', 0) < self.profit_max_position_adjustment.value:
-                sell_stake_amount = initial_stake * self.progressive_sell_pct.value
-                state_data['position_adjustment_count'] += 1
-                state_data['last_profit_exit_level'] = next_profit_trigger
-
-                # Decrement effective DCA count, with a floor of 0
-                effective_dca_count = state_data.get('effective_dca_count', 0)
-                if effective_dca_count > 0:
-                    state_data['effective_dca_count'] = effective_dca_count - 1
-
-                logger.info(f"PROFIT state: Progressive partial exit for {trade.pair}, selling {sell_stake_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
-                sell_crypto_amount = sell_stake_amount / current_rate
-                self._send_adjustment_notification(trade, "Progressive Profit Exit", -sell_stake_amount, current_rate, current_profit)
-                return -sell_crypto_amount
-
-        # For reload check, we compare current stake vs initial stake?
-        # User said "Change dca_amount calculation to use stored initial_stake" for reload logic.
-        # But for the *condition* "current stake amount is too low", the snippet used `trade.amount * current_rate`.
-        # I'll stick to snippet logic for condition, but use initial_stake for amount.
-        current_stake_usd = trade.amount * current_rate
-        # Condition: current stake < X% of INITIAL stake? Or max stake?
-        # The snippet had `trade.stake_amount * self.profit_reload_threshold.value`.
-        # `trade.stake_amount` changes. If we want to relate to initial size, we should probably use `initial_stake`.
-        # But let's stick to the snippet logic for condition to be safe, unless it conflicts.
-        # Wait, if we sell, `trade.stake_amount` drops. So reloading when it drops below a % of "stake_amount" is ambiguous if stake_amount is current.
-        # I'll use `trade.stake_amount` for the threshold base as in the snippet, but `initial_stake` for the *amount* to buy.
-
-        if current_stake_usd < trade.stake_amount * self.profit_reload_threshold.value and last_profit_level > 0:
-            if current_profit < last_profit_level:
-                try:
-                    dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
-                    if not dataframe.empty:
-                        last_candle = dataframe.iloc[-1]
-                        ml_conf = last_candle.get('ml_confidence', 0.1)
-                        if ((not trade.is_short and last_candle['enter_long'] == 1) or
-                            (trade.is_short and last_candle['enter_short'] == 1)) and \
-                           ml_conf > self.dca_ml_conf_threshold.value:
-
-                            dca_amount = initial_stake * self.profit_dca_multiplier.value
-                            if self.capital_management_enabled.value:
-                                try:
-                                    currency = trade.stake_currency
-                                    total_wallet_balance = self._get_total_wallet_balance(currency)
-                                    current_total_stake = self._get_current_total_stake(currency)
-
-                                    if total_wallet_balance > 0:
-                                        max_allowed_stake = total_wallet_balance * self.max_wallet_exposure.value
-                                        if current_total_stake + dca_amount > max_allowed_stake:
-                                            logger.warning(f"CAPITAL MGMT: Reload for {trade.pair} blocked.")
-                                            return None
-                                except Exception as e:
-                                    logger.error(f"Error in capital management check (Reload): {e}")
-
-                            logger.info(f"PROFIT state: Reloading position for {trade.pair}.")
-                            state_data['last_profit_exit_level'] = 0.0
-                            self._send_adjustment_notification(trade, "Position Reload", dca_amount, current_rate, current_profit)
-                            return dca_amount
-                except Exception as e:
-                    logger.error(f"Error in reload decision for {trade.pair}: {e}")
-        return None
-
-    def _handle_max_dca_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
-        # Use stored initial_stake
-        st = self._state.get(trade.pair, {})
-        initial_stake = float(st.get('initial_stake', trade.stake_amount))
-
-        if current_profit > self.max_dca_take_profit_pct.value:
-            # Sell % of INITIAL stake (AceVault Logic requested earlier, but snippet uses trade.amount)
-            # The previous instruction was "Locate 'PROFIT' state exit logic... use stored initial_stake".
-            # It didn't explicitly say MAX_DCA.
-            # But the logic implies consistency.
-            # However, for MAX_DCA de-risking, selling a % of *current* position might be safer if we are over-exposed.
-            # Snippet: `trade.amount * self.max_dca_sell_amount_pct.value` (Crypto amount)
-            # AceVault param `max_dca_sell_amount_pct` is 0.3 (30%).
-            # If we use initial_stake, we get a USD amount.
-            # I will use `initial_stake * pct` for consistency with AceVault request where applicable.
-            # But wait, `trade.amount` is the full position.
-            # If we want to sell 30% of position, `trade.amount * 0.3` is correct.
-            # If we sell 30% of *initial stake*, that might be tiny if we DCA'd 10 times.
-            # I will stick to the snippet's logic for MAX_DCA (selling portion of *current* holdings) as it's de-risking the *huge* bag.
-            # User instruction: "Change sell_stake_amount calculation to use stored initial_stake" was for PROFIT state.
-
-            # Correction: User instruction in TURN 1: "Locate 'MAX_DCA' state...". No, it didn't mention MAX_DCA.
-            # It said: "Locate 'PROFIT' state exit logic... Locate 'PROFIT' state reload logic...".
-            # So MAX_DCA is not explicitly forced to `initial_stake`.
-            # I will stick to the provided snippet for MAX_DCA (trade.amount * pct).
-
-            sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
-            logger.info(f"MAX_DCA state: Taking profit for {trade.pair}, selling {sell_amount_crypto}")
-            self._send_adjustment_notification(trade, "Max_DCA Profit Take", -sell_amount_crypto * current_rate, current_rate, current_profit)
-            return -sell_amount_crypto
-
-        # De-risking for losing trades that hit max DCA
-        if current_profit < 0:
-            sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
-            logger.warning(f"MAX_DCA state: De-risking losing trade for {trade.pair}. Selling {sell_amount_crypto:.8f} ({self.max_dca_sell_amount_pct.value:.0%})")
-
-            # Decrement DCA count and reset state to allow "unstucking"
-            state_data['effective_dca_count'] = state_data.get('effective_dca_count', self.defending_max_dca.value) - 1
-            state_data['trade_state'] = 'DEFENDING'
-            logger.info(f"Transitioning {trade.pair} back to DEFENDING. New effective DCA count: {state_data['effective_dca_count']}")
-
-            self._send_adjustment_notification(trade, "Max_DCA De-Risk", -sell_amount_crypto * current_rate, current_rate, current_profit)
-            return -sell_amount_crypto
-
-        logger.debug(f"MAX_DCA state: Holding {trade.pair} at {current_profit:.2%}, waiting for profit > {self.max_dca_take_profit_pct.value:.2%} or loss to de-risk.")
-        return None

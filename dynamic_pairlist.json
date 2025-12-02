@@ -1,0 +1,23 @@
+{
+  "pairs": [
+    "ASTER/USDC:USDC",
+    "AVAX/USDC:USDC",
+    "BTC/USDC:USDC",
+    "DOGE/USDC:USDC",
+    "DOT/USDC:USDC",
+    "ENS/USDC:USDC",
+    "ETH/USDC:USDC",
+    "ETHFI/USDC:USDC",
+    "FIL/USDC:USDC",
+    "HYPE/USDC:USDC",
+    "IP/USDC:USDC",
+    "JTO/USDC:USDC",
+    "SEI/USDC:USDC",
+    "SOL/USDC:USDC",
+    "STBL/USDC:USDC",
+    "SUI/USDC:USDC",
+    "TAO/USDC:USDC",
+    "TRUMP/USDC:USDC",
+    "WLD/USDC:USDC"
+  ]
+}
