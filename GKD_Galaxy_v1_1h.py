@@ -3893,7 +3893,22 @@ class GKD_Galaxy_v1_1h(IStrategy):
         # --- State Machine Initialization ---
         original_state_data = state_data.copy()
         if not isinstance(state_data, dict) or 'trade_state' not in state_data:
-            state_data = {'trade_state': 'INITIAL', 'last_adjustment_hour': -1, 'position_adjustment_count': 0}
+            # 🚀 STATE RECOVERY: Try to reconstruct state from orders if lost (fixes infinite loop)
+            # Count how many partial exits have already happened
+            try:
+                sell_orders = [o for o in trade.orders if o.ft_order_side == 'sell' and o.status == 'closed']
+                adjustment_count = len(sell_orders)
+
+                logger.info(f"🔄 STATE RECOVERY: {trade.pair} - Recovered {adjustment_count} adjustments from order history.")
+            except Exception as e:
+                logger.error(f"Error recovering state for {trade.pair}: {e}")
+                adjustment_count = 0
+
+            state_data = {
+                'trade_state': 'INITIAL',
+                'last_adjustment_hour': -1,
+                'position_adjustment_count': adjustment_count
+            }
         
         # Ensure effective_dca_count exists for backward compatibility
         if 'effective_dca_count' not in state_data:
@@ -3907,11 +3922,11 @@ class GKD_Galaxy_v1_1h(IStrategy):
         if state == 'INITIAL':
             self._handle_initial_state(trade, current_profit, state_data)
         elif state == 'DEFENDING':
-            result = self._handle_defending_state(trade, current_profit, state_data, current_rate)
+            result = self._handle_defending_state(trade, current_profit, state_data, current_rate, min_stake)
         elif state == 'PROFIT':
-            result = self._handle_profit_state(trade, current_profit, state_data, current_rate)
+            result = self._handle_profit_state(trade, current_profit, state_data, current_rate, min_stake)
         elif state == 'MAX_DCA':
-            result = self._handle_max_dca_state(trade, current_profit, state_data, current_rate)
+            result = self._handle_max_dca_state(trade, current_profit, state_data, current_rate, min_stake)
 
         # --- Save state_data if it has changed ---
         if state_data != original_state_data:
@@ -3930,7 +3945,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
             state_data['last_profit_exit_level'] = 0.0
             logger.info(f"Transitioning {trade.pair} to PROFIT state.")
 
-    def _handle_defending_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+    def _handle_defending_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float, min_stake: float) -> Optional[float]:
         effective_dca_count = state_data.get('effective_dca_count', trade.nr_of_successful_buys - 1)
 
         if effective_dca_count >= self.defending_max_dca.value:
@@ -3957,6 +3972,14 @@ class GKD_Galaxy_v1_1h(IStrategy):
                 if should_dca:
                     dca_amount = trade.stake_amount * self.progressive_buy_pct.value
                     
+                    # --- Min Stake Check ---
+                    if dca_amount < min_stake:
+                        logger.warning(
+                            f"DEFENDING: DCA for {trade.pair} skipped. "
+                            f"Amount {dca_amount:.2f} USD is below min_stake {min_stake:.2f} USD."
+                        )
+                        return None
+
                     if self.capital_management_enabled.value:
                         try:
                             currency = trade.stake_currency
@@ -3981,13 +4004,23 @@ class GKD_Galaxy_v1_1h(IStrategy):
         
         return None
 
-    def _handle_profit_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+    def _handle_profit_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float, min_stake: float) -> Optional[float]:
         last_profit_level = state_data.get('last_profit_exit_level', 0.0)
         next_profit_trigger = last_profit_level + self.progressive_profit_trigger.value
 
         if current_profit > next_profit_trigger:
             if state_data.get('position_adjustment_count', 0) < self.profit_max_position_adjustment.value:
                 sell_stake_amount = trade.stake_amount * self.progressive_sell_pct.value
+
+                # --- Min Stake Check ---
+                if sell_stake_amount < min_stake:
+                    logger.warning(
+                        f"PROFIT: Partial exit for {trade.pair} skipped. "
+                        f"Amount {sell_stake_amount:.2f} USD is below min_stake {min_stake:.2f} USD."
+                    )
+                    # Do not update state (don't burn this level) if we can't execute
+                    return None
+
                 state_data['position_adjustment_count'] += 1
                 state_data['last_profit_exit_level'] = next_profit_trigger
                 
@@ -4014,6 +4047,15 @@ class GKD_Galaxy_v1_1h(IStrategy):
                            ml_conf > self.dca_ml_conf_threshold.value:
                             
                             dca_amount = trade.stake_amount * self.profit_dca_multiplier.value
+
+                            # --- Min Stake Check ---
+                            if dca_amount < min_stake:
+                                logger.warning(
+                                    f"PROFIT: Reload for {trade.pair} skipped. "
+                                    f"Amount {dca_amount:.2f} USD is below min_stake {min_stake:.2f} USD."
+                                )
+                                return None
+
                             if self.capital_management_enabled.value:
                                 try:
                                     currency = trade.stake_currency
@@ -4036,9 +4078,20 @@ class GKD_Galaxy_v1_1h(IStrategy):
                     logger.error(f"Error in reload decision for {trade.pair}: {e}")
         return None
 
-    def _handle_max_dca_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float) -> Optional[float]:
+    def _handle_max_dca_state(self, trade: Trade, current_profit: float, state_data: dict, current_rate: float, min_stake: float) -> Optional[float]:
         if current_profit > self.max_dca_take_profit_pct.value:
             sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
+            sell_value_usd = sell_amount_crypto * current_rate
+
+            # --- Min Stake Check ---
+            # For partial exits in MAX_DCA, we check value
+            if sell_value_usd < min_stake: # Assuming min_stake is USD value roughly
+                 logger.warning(
+                    f"MAX_DCA: Profit take for {trade.pair} skipped. "
+                    f"Value {sell_value_usd:.2f} USD is below min_stake."
+                )
+                 return None
+
             logger.info(f"MAX_DCA state: Taking profit for {trade.pair}, selling {sell_amount_crypto}")
             self._send_adjustment_notification(trade, "Max_DCA Profit Take", sell_amount_crypto, current_rate, current_profit)
             return -sell_amount_crypto
@@ -4046,6 +4099,16 @@ class GKD_Galaxy_v1_1h(IStrategy):
         # De-risking for losing trades that hit max DCA
         if current_profit < 0:
             sell_amount_crypto = trade.amount * self.max_dca_sell_amount_pct.value
+            sell_value_usd = sell_amount_crypto * current_rate
+
+            # --- Min Stake Check ---
+            if sell_value_usd < min_stake:
+                 logger.warning(
+                    f"MAX_DCA: De-risk for {trade.pair} skipped. "
+                    f"Value {sell_value_usd:.2f} USD is below min_stake."
+                )
+                 return None
+
             logger.warning(f"MAX_DCA state: De-risking losing trade for {trade.pair}. Selling {sell_amount_crypto:.8f} ({self.max_dca_sell_amount_pct.value:.0%})")
             
             # Decrement DCA count and reset state to allow "unstucking"
