@@ -2287,12 +2287,12 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
     # --- DEFENDING State Parameters ---
     defending_dca_multiplier = DecimalParameter(0.1, 2.0, default=0.1, space='buy', optimize=True)
-    defending_max_dca = IntParameter(1, 15, default=15, space='buy', optimize=True)
+    defending_max_dca = IntParameter(1, 30, default=30, space='buy', optimize=True)
     dca_first_trigger = DecimalParameter(-0.20, -0.05, default=-0.20, space='buy', optimize=False)
     dca_subsequent_trigger = DecimalParameter(-0.10, -0.02, default=-0.10, space='buy', optimize=False)
 
     # --- PROFIT State Parameters ---
-    profit_max_position_adjustment = IntParameter(1, 15, default=15, space='sell', optimize=True)
+    profit_max_position_adjustment = IntParameter(1, 30, default=30, space='sell', optimize=True)
     profit_dca_multiplier = DecimalParameter(0.1, 0.5, default=0.1, space='buy', optimize=True)
     profit_take_profit_pct = DecimalParameter(0.005, 0.03, default=0.1, space='sell', optimize=True)
     profit_sell_amount_pct = DecimalParameter(0.1, 0.5, default=0.25, space='sell', optimize=True)
@@ -2303,7 +2303,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
     max_dca_sell_amount_pct = DecimalParameter(0.1, 0.5, default=0.3, space='sell', optimize=True)
 
     # --- ML Confidence Threshold ---
-    dca_ml_conf_threshold = DecimalParameter(0.04, 0.9, default=0.05, space='buy', optimize=True)
+    dca_ml_conf_threshold = DecimalParameter(0.04, 0.9, default=0.01, space='buy', optimize=True)
     
     # ═══════════════════════════════════════════════════════════════════════════════
     # 📊 PLOT CONFIGURATION - Beautiful Multi-Timeframe Visualization
@@ -3872,20 +3872,20 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
                             replenish_amount = base_stake * self.replenish_stake_pct.value
                             logger.info(f"FORCED REPLENISH: {trade.pair} low stake. Adding {replenish_amount:.2f} USD.")
-                            self._send_adjustment_notification(trade, "Forced Replenish", replenish_amount, current_rate, current_profit)
+                            self._send_adjustment_notification(trade, "Forced Replenish", replenish_amount, current_rate, current_profit, state_data)
                             return replenish_amount
 
                         if current_profit > self.forced_exit_profit_trigger.value:
                             sell_stake_amount = trade.stake_amount * self.forced_exit_sell_pct.value
                             sell_crypto_amount = sell_stake_amount / current_rate
                             logger.info(f"FORCED EXIT (PROFIT): {trade.pair} at {current_profit:.2%}. Selling {sell_stake_amount:.2f} USD.")
-                            self._send_adjustment_notification(trade, "Forced Profit Exit", sell_crypto_amount, current_rate, current_profit)
+                            self._send_adjustment_notification(trade, "Forced Profit Exit", sell_crypto_amount, current_rate, current_profit, state_data)
                             return -sell_crypto_amount
 
                         if current_profit < self.forced_exit_loss_trigger.value:
                             buy_stake_amount = trade.stake_amount * self.forced_exit_buy_pct.value
                             logger.info(f"FORCED DCA (LOSS): {trade.pair} at {current_profit:.2%}. Buying {buy_stake_amount:.2f} USD.")
-                            self._send_adjustment_notification(trade, "Forced DCA", buy_stake_amount, current_rate, current_profit)
+                            self._send_adjustment_notification(trade, "Forced DCA", buy_stake_amount, current_rate, current_profit, state_data)
                             return buy_stake_amount
             except Exception as e:
                 logger.error(f"Error in 3-candle forced decision logic for {trade.pair}: {e}")
@@ -3948,7 +3948,13 @@ class GKD_Galaxy_v1_1h(IStrategy):
     def _get_initial_stake(self, trade: Trade) -> float:
         """
         Calculate initial stake from order history to ensure consistent sizing
+        Prioritizes stored value in custom_data if available.
         """
+        # 🚀 NEW: Prioritize the stored value to avoid compounding/recalculation issues
+        stored_stake = trade.get_custom_data('initial_base_stake')
+        if stored_stake is not None:
+            return float(stored_stake)
+
         try:
             # Get first buy order (or sell for short)
             entry_side = 'sell' if trade.is_short else 'buy'
@@ -3989,7 +3995,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
             dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
             if not dataframe.empty:
                 last_candle = dataframe.iloc[-1]
-                ml_conf = last_candle.get('ml_confidence', 0.5)
+                ml_conf = last_candle.get('ml_confidence', 0.1)
                 
                 should_dca = (
                     ((not trade.is_short and last_candle.get('enter_long', 0) == 1) or
@@ -3999,7 +4005,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
                 
                 if should_dca:
                     initial_stake = self._get_initial_stake(trade)
-                    dca_amount = initial_stake * self.progressive_buy_pct.value
+                    dca_amount = initial_stake * 0.10
                     
                     # --- Min Stake Check ---
                     if dca_amount < min_stake:
@@ -4025,8 +4031,14 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
                     state_data['last_dca_loss_level'] = next_dca_trigger
                     state_data['effective_dca_count'] = effective_dca_count + 1
+
+                    # Decrement partial exit count on DCA to allow future profit taking
+                    current_adj_count = state_data.get('position_adjustment_count', 0)
+                    if current_adj_count > 0:
+                        state_data['position_adjustment_count'] = current_adj_count - 1
+
                     logger.info(f"DEFENDING state: Progressive DCA for {trade.pair}, adding {dca_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
-                    self._send_adjustment_notification(trade, "Progressive DCA", dca_amount, current_rate, current_profit)
+                    self._send_adjustment_notification(trade, "Progressive DCA", dca_amount, current_rate, current_profit, state_data)
                     return dca_amount
                 else:
                     logger.info(f"DEFENDING state: DCA for {trade.pair} skipped, ML signal/confidence not met.")
@@ -4064,7 +4076,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
                     # Let's keep it but reset count.
 
                     logger.info(f"PROFIT state: Max exits reached & profitable. Replenishing {replenish_amount:.2f} USD (Initial Stake Based). Reseting adjustment count.")
-                    self._send_adjustment_notification(trade, "Max Profit Replenish", replenish_amount, current_rate, current_profit)
+                    self._send_adjustment_notification(trade, "Max Profit Replenish", replenish_amount, current_rate, current_profit, state_data)
                     return replenish_amount
 
             else:
@@ -4090,7 +4102,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
                 
                 logger.info(f"PROFIT state: Progressive partial exit for {trade.pair}, selling {sell_stake_amount:.2f} USD. New effective DCA count: {state_data['effective_dca_count']}")
                 sell_crypto_amount = sell_stake_amount / current_rate
-                self._send_adjustment_notification(trade, "Progressive Profit Exit", sell_crypto_amount, current_rate, current_profit)
+                self._send_adjustment_notification(trade, "Progressive Profit Exit", sell_crypto_amount, current_rate, current_profit, state_data)
                 return -sell_crypto_amount
 
         current_stake_usd = trade.amount * current_rate
@@ -4100,7 +4112,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
                     dataframe, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
                     if not dataframe.empty:
                         last_candle = dataframe.iloc[-1]
-                        ml_conf = last_candle.get('ml_confidence', 0.5)
+                        ml_conf = last_candle.get('ml_confidence', 0.1)
                         if ((not trade.is_short and last_candle['enter_long'] == 1) or
                             (trade.is_short and last_candle['enter_short'] == 1)) and \
                            ml_conf > self.dca_ml_conf_threshold.value:
@@ -4131,7 +4143,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
                             logger.info(f"PROFIT state: Reloading position for {trade.pair}.")
                             state_data['last_profit_exit_level'] = 0.0
-                            self._send_adjustment_notification(trade, "Position Reload", dca_amount, current_rate, current_profit)
+                            self._send_adjustment_notification(trade, "Position Reload", dca_amount, current_rate, current_profit, state_data)
                             return dca_amount
                 except Exception as e:
                     logger.error(f"Error in reload decision for {trade.pair}: {e}")
@@ -4152,7 +4164,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
                  return None
 
             logger.info(f"MAX_DCA state: Taking profit for {trade.pair}, selling {sell_amount_crypto}")
-            self._send_adjustment_notification(trade, "Max_DCA Profit Take", sell_amount_crypto, current_rate, current_profit)
+            self._send_adjustment_notification(trade, "Max_DCA Profit Take", sell_amount_crypto, current_rate, current_profit, state_data)
             return -sell_amount_crypto
         
         # De-risking for losing trades that hit max DCA
@@ -4175,7 +4187,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
             state_data['trade_state'] = 'DEFENDING'
             logger.info(f"Transitioning {trade.pair} back to DEFENDING. New effective DCA count: {state_data['effective_dca_count']}")
 
-            self._send_adjustment_notification(trade, "Max_DCA De-Risk", sell_amount_crypto, current_rate, current_profit)
+            self._send_adjustment_notification(trade, "Max_DCA De-Risk", sell_amount_crypto, current_rate, current_profit, state_data)
             return -sell_amount_crypto
 
         logger.debug(f"MAX_DCA state: Holding {trade.pair} at {current_profit:.2%}, waiting for profit > {self.max_dca_take_profit_pct.value:.2%} or loss to de-risk.")
@@ -4522,7 +4534,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
     
     def custom_stake_amount(self, pair: str, current_time: datetime, current_rate: float,
                             proposed_stake: float, min_stake: float, max_stake: float,
-                            leverage: float, entry_tag: str, side: str, **kwargs) -> float:
+                            leverage: float, entry_tag: str, side: str, trade: Trade = None, **kwargs) -> float:
         """
         🚀 V67 DYNAMIC POSITION SIZING
         
@@ -4534,8 +4546,12 @@ class GKD_Galaxy_v1_1h(IStrategy):
         
         Returns: Adjusted stake amount
         """
+        # Ensure DCA orders (existing trades) do not go through dynamic sizing logic
+        if trade and trade.nr_of_successful_buys > 0:
+            return proposed_stake
+
         try:
-            dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+
             if dataframe.empty:
                 return proposed_stake
             
@@ -4626,6 +4642,13 @@ class GKD_Galaxy_v1_1h(IStrategy):
             if abs(ideal_stake - final_stake) > 0.01 or multiplier != 1.0:
                  logger.info(f"💰 STAKE: {pair} {entry_tag} | ML={ml_conf:.0%} Q={quality_score:.0f} "
                            f"→ Ideal: {ideal_stake:.2f} → Final: {final_stake:.2f} USDT")
+
+            # --- NEW: Store the initial stake amount ---
+            # The 'trade' object is passed by Freqtrade even for new entries
+            # and handles the custom_data persistence before it's saved.
+            if trade and not trade.custom_data.get('initial_base_stake'):
+                trade.set_custom_data('initial_base_stake', final_stake)
+                logger.info(f"💾 {pair}: Saved initial_base_stake={final_stake:.2f} USD")
 
             return final_stake
             
@@ -5124,7 +5147,7 @@ class GKD_Galaxy_v1_1h(IStrategy):
 
         return 0.0
 
-    def _send_adjustment_notification(self, trade: Trade, adjustment_type: str, amount: float, current_rate: float, current_profit: float):
+    def _send_adjustment_notification(self, trade: Trade, adjustment_type: str, amount: float, current_rate: float, current_profit: float, state_data: dict = None):
         if not self.telegram_adjustment_notification_enabled.value:
             return
 
@@ -5147,24 +5170,45 @@ class GKD_Galaxy_v1_1h(IStrategy):
             profit_usd = (current_rate - trade.open_rate) * trade.amount if not trade.is_short else (trade.open_rate - current_rate) * trade.amount
             profit_usd_str = f"({profit_usd:+.2f} USD)"
 
+            # Calculate Cumulative Profit (Realized + Unrealized)
+            realized_profit = trade.realized_profit or 0.0
+            total_profit_usd = realized_profit + profit_usd
+            total_profit_str = f"({total_profit_usd:+.2f} USD)"
+
             # Get pair-specific performance stats from memory
             pair_stats = self.pair_loss_memory.get_stats(trade.pair)
             win_rate = pair_stats.get('win_rate', 0.0)
             avg_profit = pair_stats.get('avg_profit', 0.0)
             consecutive_losses = pair_stats.get('consecutive_losses', 0)
 
+            # Get state info for detailed notification
+            if state_data is None:
+                state_data = trade.get_custom_data('state_data') or {}
+
+            dca_count = state_data.get('effective_dca_count', 0)
+            part_exit_count = state_data.get('position_adjustment_count', 0)
+            max_dca = self.defending_max_dca.value
+            max_part_exit = self.profit_max_position_adjustment.value
+
+            # Estimate total adjustments (entries + exits)
+            total_adjustments = trade.nr_of_successful_buys + trade.nr_of_successful_sells
+
             # Format the message using Markdown
             message = (
-                f"{action_emoji} *Trade Adjustment*\n\n"
+                f"{action_emoji} *Trade Adjustment* {action_emoji}\n\n"
                 f"**Pair:** `{trade.pair}`\n"
                 f"**Action:** {adjustment_type.upper()}\n"
                 f"**Amount:** `{abs(amount):.4f}`\n\n"
                 f"--- **Trade Status** ---\n"
-                f"**{profit_str}** {profit_usd_str}\n"
+                f"**Current P/L:** {profit_str} {profit_usd_str}\n"
+                f"**Cumulative P/L:** `{total_profit_usd:+.2f} USD` (Realized: `{realized_profit:+.2f}`, Open: `{profit_usd:+.2f}`)\n"
                 f"**Entries:** `{trade.nr_of_successful_buys}`\n"
                 f"**Stake:** `{trade.stake_amount:.2f}` USD\n"
                 f"**Avg Entry:** `{trade.open_rate:.4f}`\n"
-                f"**Current Rate:** `{current_rate:.4f}`\n\n"
+                f"**Current Rate:** `{current_rate:.4f}`\n"
+                f"**DCA:** `{dca_count}/{max_dca}`\n"
+                f"**Partial Exits:** `{part_exit_count}/{max_part_exit}`\n"
+                f"**Total Adj:** `{total_adjustments}`\n\n"
                 f"--- **Pair Performance** ---\n"
                 f"**Win Rate:** `{win_rate:.1%}`\n"
                 f"**Avg P/L:** `{avg_profit:.2%}`\n"
